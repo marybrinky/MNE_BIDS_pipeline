@@ -272,6 +272,16 @@ SUBJECT_TRIGGERS: dict[str, dict[str, dict[str, int | dict]]] = {
         "pinprick": {"stimulus": 1},
         "tactile": {"stimulus": 1},
     },
+    "4859": {
+        "laser": {"stimulus": 32},
+        "pinprick": {"stimulus": 1},
+        "tactile": {"stimulus": 1},
+    },
+    "4921": {
+        "laser": {"stimulus": 32},
+        "pinprick": {"stimulus": 1},
+        "tactile": {"stimulus": 1},
+    },
     "4999": {
         "laser": {"stimulus": 32},
         "pinprick": {"stimulus": 1},
