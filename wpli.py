@@ -40,7 +40,7 @@ Usage
     python code/wpli.py --root $MEGROOT --subjects 4382
     python code/wpli.py --root $MEGROOT --bands theta
     python code/wpli.py --root $MEGROOT --overwrite
-    python code/wpli.py --root $MEGROOT --setup-parcellation --subjects 4382
+    python code/setup_parcellation.py --root $MEGROOT --subjects 4382
 """
 
 import argparse
@@ -63,264 +63,23 @@ from core import (
     setup_logging,
     sub_id,
 )
+from connectivity_common import (
+    LAMBDA2,
+    SNR,
+    extract_roi_time_courses,
+    load_roi_labels,
+    load_trial_mask,
+    _bandpass,
+    _exists,
+    _get_roi_pairs,
+)
 
 DEFAULT_ROOT = Path("/Volumes/ExtremePro/laser")
-
-
-# ---------------------------------------------------------------------------
-# Trial selection via ratings TSV
-# ---------------------------------------------------------------------------
-
-
-def load_trial_mask(
-    paths: Paths,
-    label: str,
-    task: str,
-    trial_filter: str,
-    n_epochs: int,
-    logger,
-) -> np.ndarray | None:
-    """Boolean mask of trials to keep based on ratings TSV.
-
-    Parameters
-    ----------
-    trial_filter : str
-        "all"       — keep all trials (default, returns None = no filtering)
-        "perceived" — keep only trials with intensity > 0 and not "miss"
-
-    Returns None when no filtering is needed or ratings file is missing.
-    """
-    import csv
-    tag = f"sub-{label} / {task}"
-
-    if trial_filter == "all":
-        return None
-
-    tsv = (
-        paths.deriv / "ratings" / sub_id(label)
-        / f"{sub_id(label)}_task-{task}_ratings.tsv"
-    )
-    if not tsv.exists():
-        logger.warning(
-            "[%s]  Ratings TSV not found — using all trials. "
-            "Run match_ratings.py first to enable --trials perceived.", tag
-        )
-        return None
-
-    with open(tsv, newline="") as f:
-        reader = csv.DictReader(f, delimiter="\t")
-        rows   = list(reader)
-
-    if len(rows) != n_epochs:
-        logger.warning(
-            "[%s]  Ratings TSV has %d rows but epochs has %d trials — "
-            "skipping filter.", tag, len(rows), n_epochs
-        )
-        return None
-
-    mask   = np.zeros(n_epochs, dtype=bool)
-    n_kept = 0
-    for i, row in enumerate(rows):
-        intensity = str(row.get("intensity", "")).strip().lower()
-        matched   = str(row.get("matched",   "")).strip().lower()
-        if matched != "true":
-            continue
-        if intensity in ("", "nan", "miss", "none"):
-            continue
-        try:
-            if float(intensity) > 0:
-                mask[i] = True
-                n_kept  += 1
-        except ValueError:
-            continue
-
-    logger.info("[%s]  Trial filter '%s': %d / %d trials kept",
-                tag, trial_filter, n_kept, n_epochs)
-    return mask
-
-# ---------------------------------------------------------------------------
-# Parameters
-# ---------------------------------------------------------------------------
-
-SNR          = 3.0
-LAMBDA2      = 1.0 / SNR**2
-FILTER_ORDER = 4
 
 FREQ_BANDS: dict[str, tuple[float, float]] = {
     "theta": (4.0, 8.0),
     "alpha": (8.0, 12.0),
 }
-
-
-# ---------------------------------------------------------------------------
-# ROI helpers
-# ---------------------------------------------------------------------------
-
-
-def _get_roi_definitions(atlas_key: str = DEFAULT_ATLAS) -> dict[str, list[str]]:
-    return ATLAS_CONFIGS[atlas_key]["rois"]
-
-
-def _get_roi_pairs(roi_names: list[str]) -> list[tuple[str, str]]:
-    """Predefined bilateral pain-matrix pairs, or all combinations."""
-    coarse_pairs = [
-        ("SI_l",    "SII_r"),
-        ("SI_l",    "SII_l"),
-        ("SI_l",    "Insula_r"),
-        ("SI_l",    "Insula_l"),
-        ("SII_r",   "SII_l"),
-        ("SII_r",   "Insula_r"),
-        ("SII_r",   "Insula_l"),
-        ("SII_l",   "Insula_r"),
-        ("SII_l",   "Insula_l"),
-        ("Insula_r","Insula_l"),
-    ]
-    coarse_rois = {"SI_r","SI_l","SII_r","SII_l","Insula_r","Insula_l","ACC"}
-    if set(roi_names).issubset(coarse_rois):
-        return [(a,b) for a,b in coarse_pairs if a in roi_names and b in roi_names]
-    pairs = []
-    for i, a in enumerate(roi_names):
-        for b in roi_names[i+1:]:
-            pairs.append((a, b))
-    return pairs
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _exists(path: Path) -> bool:
-    return path.exists() and path.stat().st_size > 0
-
-
-def _bandpass(signal: np.ndarray, lo: float, hi: float, sfreq: float) -> np.ndarray:
-    nyq = sfreq / 2.0
-    b, a = butter(FILTER_ORDER, [lo/nyq, hi/nyq], btype="band")
-    return filtfilt(b, a, signal)
-
-
-# ---------------------------------------------------------------------------
-# Step 1: Load ROI labels
-# ---------------------------------------------------------------------------
-
-
-def load_roi_labels(
-    paths: Paths, label: str, logger, atlas_key: str = DEFAULT_ATLAS
-) -> dict[str, list]:
-    tag       = f"sub-{label}"
-    atlas_cfg = ATLAS_CONFIGS[atlas_key]
-    parc      = atlas_cfg["parc"]
-    roi_defs  = atlas_cfg["rois"]
-
-    all_labels = mne.read_labels_from_annot(
-        sub_id(label), parc=parc,
-        subjects_dir=str(paths.freesurfer_dir()), verbose=False,
-    )
-    logger.info("[%s]  Loaded %d labels from %s", tag, len(all_labels), parc)
-
-    base_to_label: dict[str, mne.Label] = {}
-    for lbl in all_labels:
-        base = lbl.name.removesuffix("-lh").removesuffix("-rh")
-        base_to_label[base] = lbl
-
-    roi_label_map: dict[str, list] = {}
-    for roi_name, label_names in roi_defs.items():
-        matched = []
-        for ln in label_names:
-            base = ln.removesuffix("-lh").removesuffix("-rh")
-            if base in base_to_label:
-                matched.append(base_to_label[base])
-            else:
-                logger.warning("[%s]  Label not found in %s: %s", tag, parc, ln)
-        if matched:
-            roi_label_map[roi_name] = matched
-            hemi_counts = {
-                "lh": sum(1 for l in matched if l.name.endswith("-lh")),
-                "rh": sum(1 for l in matched if l.name.endswith("-rh")),
-            }
-            logger.info("[%s]  ROI '%s': %d labels %s", tag, roi_name, len(matched), hemi_counts)
-        else:
-            logger.warning("[%s]  ROI '%s': NO labels matched", tag, roi_name)
-    return roi_label_map
-
-
-# ---------------------------------------------------------------------------
-# Step 2: Extract ROI time courses
-# ---------------------------------------------------------------------------
-
-
-def extract_roi_time_courses(
-    paths: Paths,
-    label: str,
-    task: str,
-    epoch_config: str,
-    inv: mne.minimum_norm.InverseOperator,
-    roi_label_map: dict[str, list],
-    logger,
-    trial_filter: str = "all",
-) -> tuple[np.ndarray, np.ndarray, list[str], list[str]] | None:
-    """Apply inverse to single trials → mean-flip ROI time courses.
-
-    Returns (data, times, roi_names, conditions) or None on failure.
-    data shape: (n_rois, n_epochs, n_times)
-    """
-    tag      = f"sub-{label} / {task}"
-    cfg      = EPOCH_CONFIGS[epoch_config]
-    epo_file = paths.epochs(label, task, desc=f"{cfg['desc']}-preproc")
-
-    if not _exists(epo_file):
-        logger.warning("[%s]  Epochs not found: %s", tag, epo_file.name)
-        return None
-    src_file = paths.src(label)
-    if not _exists(src_file):
-        logger.warning("[%s]  Source space not found", tag)
-        return None
-
-    logger.info("[%s]  Loading epochs ...", tag)
-    epochs = mne.read_epochs(str(epo_file), preload=True, verbose=False)
-    src    = mne.read_source_spaces(str(src_file), verbose=False)
-
-    common_chs = [ch for ch in inv["info"]["ch_names"] if ch in set(epochs.ch_names)]
-    epochs     = epochs.pick(common_chs, verbose=False)
-    logger.info("[%s]  Channels after alignment: %d", tag, len(common_chs))
-
-    # Apply trial filter from ratings TSV
-    trial_mask = load_trial_mask(paths, label, task, trial_filter, len(epochs), logger)
-    if trial_mask is not None:
-        epochs = epochs[trial_mask]
-        if len(epochs) < 5:
-            logger.warning("[%s]  Too few epochs after filtering (%d) — skipping",
-                           tag, len(epochs))
-            return None
-
-    logger.info("[%s]  Applying inverse to %d single trials ...", tag, len(epochs))
-    stcs = mne.minimum_norm.apply_inverse_epochs(
-        epochs, inv, lambda2=LAMBDA2, method="dSPM",
-        pick_ori="normal", verbose=False,
-    )
-
-    stc_subject = stcs[0].subject
-    for roi_labels in roi_label_map.values():
-        for lbl in roi_labels:
-            lbl.subject = stc_subject
-
-    roi_names = list(roi_label_map.keys())
-    times     = stcs[0].times
-    data      = np.zeros((len(roi_names), len(stcs), len(times)), dtype=np.float32)
-
-    for ei, stc in enumerate(stcs):
-        for ri, roi_name in enumerate(roi_names):
-            tc = mne.extract_label_time_course(
-                stc, roi_label_map[roi_name], src, mode="mean_flip", verbose=False,
-            )
-            data[ri, ei, :] = tc.mean(axis=0)
-
-    id_to_name = {v: k for k, v in epochs.event_id.items()}
-    conditions = [id_to_name.get(epochs.events[i, 2], "unknown") for i in range(len(stcs))]
-
-    logger.info("[%s]  ROI time courses: shape %s", tag, data.shape)
-    return data, times, roi_names, conditions
 
 
 # ---------------------------------------------------------------------------
@@ -344,40 +103,6 @@ def compute_wpli(
     aa = np.array([hilbert(_bandpass(tc_a[i], lo, hi, sfreq)) for i in range(n)])
     ab = np.array([hilbert(_bandpass(tc_b[i], lo, hi, sfreq)) for i in range(n)])
     return _compute_wpli_from_analytic(aa, ab)
-
-
-# ---------------------------------------------------------------------------
-# Step 0: Parcellation setup
-# ---------------------------------------------------------------------------
-
-
-def setup_parcellation(
-    paths: Paths, label: str, atlas_key: str = DEFAULT_ATLAS,
-    overwrite: bool = False, logger=None,
-) -> bool:
-    tag          = f"sub-{label}"
-    atlas_cfg    = ATLAS_CONFIGS[atlas_key]
-    parc         = atlas_cfg["parc"]
-    subjects_dir = str(paths.freesurfer_dir())
-    subject      = sub_id(label)
-
-    lh = paths.freesurfer_dir() / subject / "label" / f"lh.{parc}.annot"
-    rh = paths.freesurfer_dir() / subject / "label" / f"rh.{parc}.annot"
-    if lh.exists() and rh.exists() and not overwrite:
-        logger.info("[%s]  %s already exists — skipping", tag, parc)
-        return True
-
-    logger.info("[%s]  Setting up %s ...", tag, parc)
-    try:
-        mne.datasets.fetch_hcp_mmp_parcellation(subjects_dir=subjects_dir, verbose=False)
-        fsavg = mne.read_labels_from_annot("fsaverage", parc=parc, subjects_dir=subjects_dir, verbose=False)
-        morphed = mne.morph_labels(fsavg, subject_to=subject, subject_from="fsaverage", subjects_dir=subjects_dir)
-        mne.write_labels_to_annot(morphed, subject=subject, parc=parc, subjects_dir=subjects_dir, overwrite=True, verbose=False)
-        logger.info("[%s]  Written: lh.%s.annot, rh.%s.annot", tag, parc, parc)
-        return True
-    except Exception as e:
-        logger.error("[%s]  Parcellation failed: %s", tag, e, exc_info=True)
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -492,33 +217,21 @@ def main():
     parser.add_argument("--atlas",        default=DEFAULT_ATLAS, choices=list(ATLAS_CONFIGS.keys()))
     parser.add_argument("--overwrite",    action="store_true")
     parser.add_argument(
-        "--trials", default="all", choices=["all", "perceived"],
+        "--trials", default="all", choices=["all", "perceived", "not-perceived"],
         help=(
             "'all' = all epochs (default). "
             "'perceived' = only trials rated > 0 and not 'miss'. "
+            "'not-perceived' = only trials rated exactly 0 and not 'miss'. "
             "Requires match_ratings.py to have been run first. "
-            "Output file gets suffix _perceived so both versions coexist."
+            "Output file gets a matching suffix so all versions coexist."
         ),
     )
-    parser.add_argument("--setup-parcellation", action="store_true",
-                        help="Morph HCPMMP1 from fsaverage to each subject (run once).")
     args = parser.parse_args()
 
     paths    = Paths(args.root)
     logger   = setup_logging(paths, "wpli")
     subjects = args.subjects if args.subjects else load_subjects(paths)
     tasks    = args.tasks    if args.tasks    else TASKS
-
-    if args.setup_parcellation:
-        logger.info("-- Parcellation setup --  Atlas: %s  Subjects: %s", args.atlas, subjects)
-        n_ok = n_fail = 0
-        for label in subjects:
-            ok = setup_parcellation(paths, label, atlas_key=args.atlas, overwrite=args.overwrite, logger=logger)
-            if ok: n_ok += 1
-            else:  n_fail += 1
-        logger.info("Done.  OK: %d  |  Failed: %d", n_ok, n_fail)
-        if n_fail: sys.exit(1)
-        return
 
     logger.info("Subjects     : %s", subjects)
     logger.info("Tasks        : %s", tasks)

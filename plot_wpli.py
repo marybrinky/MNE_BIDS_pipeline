@@ -64,7 +64,8 @@ from core import (
     setup_logging,
     sub_id,
 )
-from wpli import FREQ_BANDS, _exists, _get_roi_pairs
+from wpli import FREQ_BANDS
+from connectivity_common import _exists, _get_roi_pairs
 
 DEFAULT_ROOT = Path("/Volumes/ExtremePro/laser")
 CONDITION_KEY = "stimulus"
@@ -191,6 +192,7 @@ def load_wpli_matrix(
     tasks: list[str],
     bands: list[str],
     atlas_key: str,
+    trial_filter: str = "all",
 ) -> tuple[dict, list[str]]:
     """Load WPLI values from HDF5 files into a nested dict.
 
@@ -211,9 +213,10 @@ def load_wpli_matrix(
 
     for label in subjects:
         for task in tasks:
+            suffix = "" if trial_filter == "all" else f"_{trial_filter}"
             fpath = (
                 paths.deriv / "connectivity" / sub_id(label) / f"task-{task}"
-                / f"{sub_id(label)}_task-{task}_wpli_painmatrix.h5"
+                / f"{sub_id(label)}_task-{task}_wpli_painmatrix{suffix}.h5"
             )
             if not fpath.exists() or fpath.stat().st_size == 0:
                 for pair in all_pairs:
@@ -245,14 +248,16 @@ def load_wpli_matrix(
 
 
 def _collect_subject_h5(
-    paths: Paths, label: str, tasks: list[str], bands: list[str]
+    paths: Paths, label: str, tasks: list[str], bands: list[str],
+    trial_filter: str = "all",
 ) -> tuple[dict[str, Path], list[float]]:
     """Return {task: h5_path} and list of all WPLI values for colour scaling."""
     task_data:  dict[str, Path] = {}
     all_values: list[float]     = []
     for task in tasks:
+        suffix = "" if trial_filter == "all" else f"_{trial_filter}"
         h5 = (paths.deriv / "connectivity" / sub_id(label) / f"task-{task}"
-              / f"{sub_id(label)}_task-{task}_wpli_painmatrix.h5")
+              / f"{sub_id(label)}_task-{task}_wpli_painmatrix{suffix}.h5")
         if not _exists(h5):
             continue
         task_data[task] = h5
@@ -292,11 +297,12 @@ def plot_wpli_circle(
     bands: list[str],
     logger,
     atlas_key: str = DEFAULT_ATLAS,
+    trial_filter: str = "all",
 ) -> None:
     """MNE connectivity circle — one figure per band, one column per task."""
     hemi_labels = get_roi_hemisphere_labels(atlas_key)
 
-    task_data, all_values = _collect_subject_h5(paths, label, tasks, bands)
+    task_data, all_values = _collect_subject_h5(paths, label, tasks, bands, trial_filter)
     if not task_data or not all_values:
         logger.warning("[sub-%s]  No valid WPLI values for circle plot", label)
         return
@@ -371,11 +377,12 @@ def plot_wpli_topo(
     bands: list[str],
     logger,
     atlas_key: str = DEFAULT_ATLAS,
+    trial_filter: str = "all",
 ) -> None:
     """Anatomical head layout — ROIs at approximate anatomical positions."""
     hemi_labels = get_roi_hemisphere_labels(atlas_key)
 
-    task_data, all_values = _collect_subject_h5(paths, label, tasks, bands)
+    task_data, all_values = _collect_subject_h5(paths, label, tasks, bands, trial_filter)
     if not task_data or not all_values:
         logger.warning("[sub-%s]  No valid WPLI values for topo plot", label)
         return
@@ -732,6 +739,11 @@ def main():
     parser.add_argument("--bands",    nargs="+", default=list(FREQ_BANDS.keys()),
                         choices=list(FREQ_BANDS.keys()))
     parser.add_argument("--atlas",    default=DEFAULT_ATLAS, choices=list(ATLAS_CONFIGS.keys()))
+    parser.add_argument(
+        "--trials", default="all", choices=["all", "perceived", "not-perceived"],
+        help="Which trial-filtered WPLI results to load/plot "
+             "(must match the --trials used when running wpli.py).",
+    )
 
     parser.add_argument("--plot-circle",    action="store_true",
                         help="Per-subject connectivity circle (MNE polar plot).")
@@ -800,16 +812,16 @@ def main():
             if args.plot_circle:
                 logger.info("[sub-%s]  Circle plot ...", label)
                 plot_wpli_circle(paths, label, tasks, args.bands, logger,
-                                 atlas_key=args.atlas)
+                                 atlas_key=args.atlas, trial_filter=args.trials)
             if args.plot_topo:
                 logger.info("[sub-%s]  Topo plot ...", label)
                 plot_wpli_topo(paths, label, tasks, args.bands, logger,
-                               atlas_key=args.atlas)
+                               atlas_key=args.atlas, trial_filter=args.trials)
 
     # ── Group plots ──────────────────────────────────────────────────────────
     if args.plot_heatmap or args.plot_raincloud or args.plot_group:
         data, all_pairs = load_wpli_matrix(
-            paths, subjects, tasks, args.bands, args.atlas
+            paths, subjects, tasks, args.bands, args.atlas, args.trials
         )
         active_pairs = [
             p for p in all_pairs

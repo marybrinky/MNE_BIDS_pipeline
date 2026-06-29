@@ -135,6 +135,7 @@ def load_pac_matrix(
     amp_bands: list[str],
     atlas_key: str,
     metric: str = "z_score",
+    trial_filter: str = "all",
 ) -> tuple[dict, list[str], list[str]]:
     """Load PAC values from HDF5 files into a nested dict.
 
@@ -156,12 +157,13 @@ def load_pac_matrix(
 
     for label in subjects:
         for task in tasks:
+            suffix = "" if trial_filter == "all" else f"_{trial_filter}"
             fpath = (
                 paths.deriv
                 / "connectivity"
                 / sub_id(label)
                 / f"task-{task}"
-                / f"{sub_id(label)}_task-{task}_pac_painmatrix.h5"
+                / f"{sub_id(label)}_task-{task}_pac_painmatrix{suffix}.h5"
             )
 
             if not fpath.exists() or fpath.stat().st_size == 0:
@@ -611,6 +613,11 @@ def main():
         choices=list(ATLAS_CONFIGS.keys()),
     )
     parser.add_argument(
+        "--trials", default="all", choices=["all", "perceived", "not-perceived"],
+        help="Which trial-filtered PAC results to load/plot "
+             "(must match the --trials used when running pac.py).",
+    )
+    parser.add_argument(
         "--metric",
         default="z_score",
         choices=["z_score", "mi"],
@@ -653,6 +660,7 @@ def main():
         args.amp_bands,
         args.atlas,
         args.metric,
+        args.trials,
     )
 
     # Filter to directions with at least some data

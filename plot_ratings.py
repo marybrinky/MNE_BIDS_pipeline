@@ -178,8 +178,9 @@ def plot_bar_group(root, subjects, tasks, out_dir, label_str, perceived=False):
         ax.set_ylabel(unit)
         ax.legend(fontsize=8)
 
-    fig.suptitle("Error bars = SEM (standard error of the mean)", fontsize=9, y=1.02)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.suptitle("Error bars = SEM (standard error of the mean)",
+                 fontsize=9, y=0.985)
     fname = out_dir / f"ratings_bar_{label_str}_{'perceived' if perceived else 'all'}.png"
     fig.savefig(fname, dpi=150)
     plt.close(fig)

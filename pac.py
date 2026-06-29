@@ -79,7 +79,7 @@ from core import (
 )
 
 # Re-use helpers from wpli.py to keep definitions in sync
-from wpli import (
+from connectivity_common import (
     _bandpass,
     _exists,
     _get_roi_pairs,
@@ -540,12 +540,13 @@ def main():
         help="Overwrite existing PAC files",
     )
     parser.add_argument(
-        "--trials", default="all", choices=["all", "perceived"],
+        "--trials", default="all", choices=["all", "perceived", "not-perceived"],
         help=(
             "'all' = all epochs (default). "
             "'perceived' = only trials rated > 0 and not 'miss'. "
+            "'not-perceived' = only trials rated exactly 0 and not 'miss'. "
             "Requires match_ratings.py first. "
-            "Output gets suffix _perceived so both versions coexist."
+            "Output gets a matching suffix so all versions coexist."
         ),
     )
     parser.add_argument(

@@ -146,8 +146,8 @@ def load_trial_mask(
 ) -> np.ndarray | None:
     """Boolean mask of trials to keep based on behavioural ratings.
 
-    trial_filter : "perceived"  keeps only trials rated > 0 (default)
-                   "all"        keeps all trials (opt-in via --all-trials)
+    trial_filter : "perceived"  keeps only trials rated > 0 (opt-in via --perceived)
+                   "all"        keeps all trials (default)
 
     Rating source priority:
       1. Triggercheck JSON  (derivatives/trigger_check/sub-{label}/
@@ -649,7 +649,7 @@ def epoch_one(
     reject: bool,
     overwrite: bool,
     logger,
-    reject_all_trials: bool = False,
+    reject_all_trials: bool = True,
 ) -> tuple[bool, str | None]:
     """Epoch one subject/task.  Returns (success, qc_warning_or_None)."""
     cfg = EPOCH_CONFIGS[epoch_config]
@@ -855,7 +855,7 @@ def epoch_one(
             else:
                 logger.info("[%s]  No rating source found — keeping all epochs", tag)
     else:
-        logger.info("[%s]  --all-trials: skipping perceived filter", tag)
+        logger.info("[%s]  --perceived not set: keeping all non-rejected trials", tag)
 
     # -- Trial count statistics ------------------------------------------
     pct_rejected  = 100 * (n_total - n_after_reject)  / n_total if n_total > 0 else 0
@@ -915,12 +915,12 @@ def main():
     )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
-        "--all-trials",
+        "--perceived",
         action="store_true",
         help=(
-            "Include all trials regardless of rating. "
-            "By default only perceived trials (intensity > 0) are kept. "
-            "Use this flag for exploratory analysis or pain-vs-no-pain contrasts."
+            "Keep only trials rated > 0 (intensity-based perceived filter). "
+            "By default all non-rejected trials are kept regardless of rating. "
+            "Use this flag for pain-perception-specific analyses."
         ),
     )
     parser.add_argument(
@@ -955,7 +955,7 @@ def main():
         logger.info("-- Butterfly plot mode --")
         for label in subjects:
             for task in tasks:
-                trial_filter = "all" if args.all_trials else "perceived"
+                trial_filter = "perceived" if args.perceived else "all"
                 plot_butterfly(paths, label, task, epoch_configs[0], logger, trial_filter=trial_filter)
         return
 
@@ -982,7 +982,7 @@ def main():
                         reject=not args.no_reject,
                         overwrite=args.overwrite,
                         logger=logger,
-                        reject_all_trials=args.all_trials,
+                        reject_all_trials=not args.perceived,
                     )
                     if ok:
                         n_ok += 1
