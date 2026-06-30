@@ -24,13 +24,14 @@ Usage
 """
 
 import argparse
-import json
-import re
 import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+from core import Paths, load_subjects, sub_id
+from ratings_io import load_ratings_and_quality
 
 PAIN_TASKS = ["laser", "pinprick"]      # 0 = no pain, 100 = worst pain
 SENSATION_TASKS = ["tactile"]           # 0 = nothing, 50 = first stim, 100 = max
@@ -44,84 +45,9 @@ TASK_COLORS = {"laser": "indianred", "pinprick": "steelblue", "tactile": "seagre
 NONPAIN_LABELS = {"w", "n"}   # warm + nichts = non-painful
 
 
-def sub_id(label: str) -> str:
-    return label if label.startswith("sub-") else f"sub-{label}"
-
-
 # ---------------------------------------------------------------------------
 # Rating loaders (mirrors epoch.py logic)
 # ---------------------------------------------------------------------------
-
-def read_ratings_from_json(json_path: Path, task: str):
-    with json_path.open() as f:
-        tc = json.load(f)
-    stim_key = "is_laser" if task == "laser" else "is_stim"
-    ratings, qualities = [], []
-    for t in tc.get("trials", []):
-        if not t.get(stim_key, False):
-            continue
-        val = t.get("intensity_mat", t.get("intensity_fif"))
-        ratings.append(None if (val is None or val == -1) else float(val))
-        qualities.append(t.get("quality_fif"))
-    return ratings, qualities
-
-
-def _unwrap_cell(cell):
-    """Recursively unwrap nested arrays/lists down to a scalar string."""
-    while hasattr(cell, "__len__") and not isinstance(cell, str) and len(cell) > 0:
-        try:
-            cell = cell.flat[0] if hasattr(cell, "flat") else cell[0]
-        except (IndexError, AttributeError):
-            break
-    return re.sub(r"""[\[\]'"]""", "", str(cell).strip()).strip()
-
-
-def read_ratings_from_mat(mat_path: Path, task: str = "pinprick"):
-    """Read intensity (and, for laser, quality) ratings from a mat file.
-
-    For laser files, responses has shape (3, n): row 0 = intensity,
-    row 1 = quality letter (s/sb/b/w/n), row 2 = unused (button colour).
-    For pinprick/tactile, responses has shape (1, n): intensity only.
-    """
-    import scipy.io
-    mat = scipy.io.loadmat(str(mat_path))
-    r = mat["response"][0, 0]
-    resps = r["responses"]
-    n = resps.shape[1]
-    has_quality = task == "laser" and resps.shape[0] >= 2
-
-    ratings, qualities = [], []
-    for i in range(n):
-        val = _unwrap_cell(resps[0, i])
-        if "miss" in val.lower() or val in ("", "nan"):
-            ratings.append(None)
-        else:
-            try:
-                ratings.append(float(val))
-            except ValueError:
-                ratings.append(None)
-
-        if has_quality:
-            qval = _unwrap_cell(resps[1, i]).lower()
-            qualities.append(qval if qval in QUALITY_LABELS else None)
-        else:
-            qualities.append(None)
-    return ratings, qualities
-
-
-def load_ratings(root: Path, label: str, task: str):
-    """Returns (ratings_list, qualities_list); ratings_list has None for miss."""
-    json_path = (root / "derivatives" / "trigger_check" / sub_id(label)
-                 / f"{sub_id(label)}_task-{task}_triggercheck.json")
-    if json_path.exists():
-        return read_ratings_from_json(json_path, task)
-
-    mat_path = (root / "rawdata" / sub_id(label) / "beh"
-                / f"{sub_id(label)}_task-{task}_ratings.mat")
-    if mat_path.exists():
-        return read_ratings_from_mat(mat_path, task)
-    return [], []
-
 
 # ---------------------------------------------------------------------------
 # Stats helpers
@@ -144,6 +70,7 @@ def log1p_transform(arr):
 # ---------------------------------------------------------------------------
 
 def plot_bar_group(root, subjects, tasks, out_dir, label_str, perceived=False):
+    paths = Paths(root)
     fig, axes = plt.subplots(1, 2, figsize=(16, 5))
     n_tasks = len(tasks)
     bar_width = 0.8 / max(n_tasks, 1)
@@ -158,7 +85,7 @@ def plot_bar_group(root, subjects, tasks, out_dir, label_str, perceived=False):
         for ti, task in enumerate(tasks):
             means, sems = [], []
             for s in subjects:
-                ratings, _ = load_ratings(root, s, task)
+                ratings, _ = load_ratings_and_quality(paths, s, task)
                 arr = perceived_only(ratings) if perceived else clean(ratings)
                 if arr.size == 0:
                     means.append(np.nan)
@@ -192,13 +119,14 @@ def plot_bar_group(root, subjects, tasks, out_dir, label_str, perceived=False):
 # ---------------------------------------------------------------------------
 
 def plot_correlation(root, subjects, tasks, out_dir, label_str, perceived=False):
+    paths = Paths(root)
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     # (a) raw vs log1p per-subject mean — shows the Stevens compression effect
     raw_means, log_means = [], []
     for task in tasks:
         for s in subjects:
-            ratings, _ = load_ratings(root, s, task)
+            ratings, _ = load_ratings_and_quality(paths, s, task)
             arr = perceived_only(ratings) if perceived else clean(ratings)
             if arr.size == 0:
                 continue
@@ -213,7 +141,7 @@ def plot_correlation(root, subjects, tasks, out_dir, label_str, perceived=False)
     first_half, second_half = [], []
     for task in tasks:
         for s in subjects:
-            ratings, _ = load_ratings(root, s, task)
+            ratings, _ = load_ratings_and_quality(paths, s, task)
             arr = perceived_only(ratings) if perceived else clean(ratings)
             if arr.size < 4:
                 continue
@@ -240,10 +168,11 @@ def plot_correlation(root, subjects, tasks, out_dir, label_str, perceived=False)
 # ---------------------------------------------------------------------------
 
 def plot_laser_quality(root, subjects, out_dir):
+    paths = Paths(root)
     counts = {q: 0 for q in QUALITY_LABELS}
     n_subjects_included = 0
     for s in subjects:
-        _, qualities = load_ratings(root, s, "laser")
+        _, qualities = load_ratings_and_quality(paths, s, "laser")
         valid = [q for q in qualities if q in counts]
         if valid:
             n_subjects_included += 1
@@ -285,14 +214,15 @@ def plot_laser_quality(root, subjects, out_dir):
 # ---------------------------------------------------------------------------
 
 def plot_laser_vs_pinprick(root, subjects, out_dir, perceived=False):
+    paths = Paths(root)
     from scipy import stats
 
     subj_results = []  # (subject, mean_laser, mean_pinprick, p_value)
     laser_means, pp_means = [], []
 
     for s in subjects:
-        lr, _ = load_ratings(root, s, "laser")
-        pr, _ = load_ratings(root, s, "pinprick")
+        lr, _ = load_ratings_and_quality(paths, s, "laser")
+        pr, _ = load_ratings_and_quality(paths, s, "pinprick")
         l_arr = perceived_only(lr) if perceived else clean(lr)
         p_arr = perceived_only(pr) if perceived else clean(pr)
         if l_arr.size < 2 or p_arr.size < 2:
@@ -356,17 +286,8 @@ def main():
     args = parser.parse_args()
 
     root = args.root
-    if args.subjects:
-        subjects = args.subjects
-    else:
-        tsv = root / "rawdata" / "participants.tsv"
-        subjects = []
-        with open(tsv) as f:
-            next(f)
-            for line in f:
-                pid = line.split("\t")[0].strip()
-                if pid and pid != "sub-P01":
-                    subjects.append(pid.replace("sub-", ""))
+    paths = Paths(root)
+    subjects = args.subjects if args.subjects else load_subjects(paths)
 
     out_dir = root / "derivatives" / "logs" / "plots" / "ratings"
     out_dir.mkdir(parents=True, exist_ok=True)

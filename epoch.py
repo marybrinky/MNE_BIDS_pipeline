@@ -64,76 +64,9 @@ from core import (
     sub_id,
 )
 
+from ratings_io import read_ratings_from_json, read_ratings_from_mat
+
 DEFAULT_ROOT = Path("/Volumes/ExtremePro/laser")
-
-
-def _read_ratings_from_json(json_path: Path, task: str) -> list[float | None]:
-    """Read per-trial intensity ratings from a triggercheck JSON sidecar.
-
-    Returns a list of intensity values (float or None for miss/-1) ordered
-    by trial index (stim bundles only, in bundle order).
-    For laser JSONs: uses intensity_fif from is_laser=True bundles.
-    For pinprick/tactile JSONs: uses intensity_mat from is_stim=True bundles.
-    """
-    with json_path.open() as f:
-        tc = json.load(f)
-
-    trials = tc.get("trials", [])
-    ratings = []
-
-    # Determine which field marks a valid stimulus trial
-    stim_key = "is_laser" if task == "laser" else "is_stim"
-    # Prefer intensity_mat if present, fall back to intensity_fif
-    for t in trials:
-        if not t.get(stim_key, False):
-            continue
-        val = t.get("intensity_mat", t.get("intensity_fif"))
-        if val is None or val == -1:
-            ratings.append(None)
-        else:
-            try:
-                ratings.append(float(val))
-            except (TypeError, ValueError):
-                ratings.append(None)
-    return ratings
-
-
-def _read_ratings_from_mat(mat_path: Path) -> list[float | None]:
-    """Read intensity ratings from a behavioural mat file.
-
-    Returns a list of 50 floats (None for miss entries).
-
-    Some trials store the response wrapped in an extra array layer
-    (e.g. trial cell containing ['70'] instead of the bare string '70'),
-    which can produce a literal "['70']" string when stringified directly.
-    We unwrap recursively and strip brackets/quotes before parsing.
-    """
-    import scipy.io
-    import re
-    mat   = scipy.io.loadmat(str(mat_path))
-    r     = mat["response"][0, 0]
-    resps = r["responses"]
-    n     = resps.shape[1]
-    ratings = []
-    for i in range(n):
-        cell = resps[0, i]
-        # Recursively unwrap nested arrays/lists down to a scalar
-        while hasattr(cell, "__len__") and not isinstance(cell, str) and len(cell) > 0:
-            try:
-                cell = cell.flat[0] if hasattr(cell, "flat") else cell[0]
-            except (IndexError, AttributeError):
-                break
-        val = str(cell).strip()
-        # Strip any stray brackets/quotes left over from str() of an array
-        val = re.sub(r"""[\[\]'"]""", "", val).strip()
-        if "miss" in val.lower() or val in ("", "nan"):
-            ratings.append(None)
-        else:
-            try:
-                ratings.append(float(val))
-            except ValueError:
-                ratings.append(None)
-    return ratings
 
 
 def load_trial_mask(
@@ -175,7 +108,7 @@ def load_trial_mask(
 
     if json_path.exists():
         try:
-            ratings = _read_ratings_from_json(json_path, task)
+            ratings = read_ratings_from_json(json_path, task)
             logger.info(
                 "[%s]  Ratings from triggercheck JSON (%d stim trials found)",
                 tag, len(ratings)
@@ -192,7 +125,7 @@ def load_trial_mask(
         )
         if mat_path.exists():
             try:
-                ratings = _read_ratings_from_mat(mat_path)
+                ratings = read_ratings_from_mat(mat_path)
                 logger.info(
                     "[%s]  Ratings from mat file (%d trials found)",
                     tag, len(ratings)
